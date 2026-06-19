@@ -4,6 +4,7 @@ import numpy as np
 from flask import Flask, request, jsonify
 import os
 import urllib.request
+from flask import send_file
 
 app = Flask(__name__)
 
@@ -53,6 +54,24 @@ def analyze_video():
     cap = cv2.VideoCapture(video_path)
     knee_angles = []
     frames_processed = 0
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    if fps == 0 or fps is None:
+        fps = 30
+
+    print("FPS:", fps)
+    print("WIDTH:", width)
+    print("HEIGHT:", height)
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(
+        "output_skeleton.mp4",
+        fourcc,
+        fps,
+        (width, height)
+    )
 
     with PoseLandmarker.create_from_options(options) as landmarker:
         while True:
@@ -68,17 +87,43 @@ def analyze_video():
             timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
 
             detection_result = landmarker.detect_for_video(mp_image, timestamp_ms)
-
             if detection_result.pose_landmarks:
                 landmarks = detection_result.pose_landmarks[0]
 
+                h, w, _ = frame.shape
+                #Draw skeleton points
+                for landmark in landmarks:
+                    x = int(landmark.x * w)
+                    y = int(landmark.y * h)
+                    cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+
+                connections = [
+                    (11, 13), (13, 15),  # left arm
+                    (12, 14), (14, 16),  # right arm
+                    (11, 12),            # shoulders
+                    (11, 23), (12, 24),  # torso
+                    (23, 24),            # hips
+                    (23, 25), (25, 27),  # left leg
+                    (24, 26), (26, 28),  # right leg
+                ]
+
+                for start, end in connections:
+                    x1 = int(landmarks[start].x * w)
+                    y1 = int(landmarks[start].y * h)
+
+                    x2 = int(landmarks[end].x * w)
+                    y2 = int(landmarks[end].y * h)
+
+                    cv2.line(frame, (x1, y1), (x2, y2), (255, 0, 0), 3)
+                #Knee angle calculation
                 hip = [landmarks[24].x, landmarks[24].y]
                 knee = [landmarks[26].x, landmarks[26].y]
                 ankle = [landmarks[28].x, landmarks[28].y]
 
                 current_angle = calculate_angle(hip, knee, ankle)
                 knee_angles.append(current_angle)
-
+                out.write(frame)
+        out.release()
         cap.release()
 
     if knee_angles:
@@ -99,7 +144,9 @@ def analyze_video():
             "coaching_tip": feedback,
         }
     )
-
+@app.route("/get-video", methods=["GET"])
+def get_video():
+    return send_file("output_skeleton.mp4", mimetype="video/mp4")
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0", port=5000)

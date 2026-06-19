@@ -15,7 +15,7 @@ import * as ImagePicker from "expo-image-picker";
 //   npx localtunnel --port 5000
 // It will print a URL like: https://xxxxxx.loca.lt
 // ============================================================
-const SERVER_URL = "https://CHANGE-ME.loca.lt";
+const SERVER_URL = "https://major-beds-hope.loca.lt";
 
 export default function App() {
   const [loading, setLoading] = useState(false);
