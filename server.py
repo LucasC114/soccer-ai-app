@@ -3,6 +3,7 @@ import mediapipe as mp
 import numpy as np
 from flask import Flask, request, jsonify
 import os
+import base64
 import urllib.request
 from flask import send_file
 
@@ -41,18 +42,85 @@ def calculate_angle(a, b, c):
 
     return int(angle)
 
+def calculate_trunk_lean(shoulder, hip):
+    dx = shoulder[0] - hip[0]
+    dy = hip[1] - shoulder[1]
 
+    angle = np.degrees(np.arctan2(dx, dy))
+
+    return round(angle, 1)
+
+@app.route("/video-info", methods=["POST"])
+def video_info():
+
+    if "video" not in request.files:
+        return jsonify({"error": "No video file provided"}), 400
+
+    video = request.files["video"]
+    path = "./temp_info.mp4"
+    video.save(path)
+
+    cap = cv2.VideoCapture(path)
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    cap.release()
+
+    return jsonify({
+        "fps": fps,
+        "totalFrames": total_frames
+    })
 @app.route("/analyze", methods=["POST"])
 def analyze_video():
     if "video" not in request.files:
         return jsonify({"error": "No video file provided"}), 400
+
+    shot_type = request.form.get("shotType")
+    print ("Shot Type:", shot_type)
+
+    kicking_leg = request.form.get("kickingLeg")
+    print("Kicking Leg:", kicking_leg)
+
+    contact_time = float(request.form.get("contactTime"))
+    print("Contact time:", contact_time)
 
     video_file = request.files["video"]
     video_path = "./temp_video.mp4"
     video_file.save(video_path)
 
     cap = cv2.VideoCapture(video_path)
-    knee_angles = []
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    contact_frame = int(contact_time * fps)
+    before_seconds = 0.3
+    after_seconds = 0.2
+
+    start_frame = max(0, int(contact_frame - before_seconds * fps))
+    end_frame = int(contact_frame + after_seconds * fps)
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+
+    if fps == 0 or fps is None:
+        fps = 30
+
+    print("Contact frame:", contact_frame)
+
+    # Analyze 0.3 seconds before and 0.2 seconds after contact
+    frames_before = int(fps * 0.3)
+    frames_after = int(fps * 0.2)
+
+    start_frame = max(0, int(contact_frame) - frames_before)
+    end_frame = int(contact_frame) + frames_after
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    
+    # Store biomechanics data
+    knee_data = []
+    hip_data = []
+    ankle_data = []
+    trunk_data = []
+
     frames_processed = 0
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -74,8 +142,9 @@ def analyze_video():
     )
 
     with PoseLandmarker.create_from_options(options) as landmarker:
-        while True:
+        while cap.get(cv2.CAP_PROP_POS_FRAMES) <= end_frame:
             success, frame = cap.read()
+
             if not success:
                 break
 
@@ -97,53 +166,208 @@ def analyze_video():
                     y = int(landmark.y * h)
                     cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
 
-                connections = [
-                    (11, 13), (13, 15),  # left arm
-                    (12, 14), (14, 16),  # right arm
-                    (11, 12),            # shoulders
-                    (11, 23), (12, 24),  # torso
-                    (23, 24),            # hips
-                    (23, 25), (25, 27),  # left leg
-                    (24, 26), (26, 28),  # right leg
-                ]
+                # ---------- Select kicking leg ----------
+                if kicking_leg == "right":
+                    shoulder = [landmarks[12].x, landmarks[12].y]
+                    hip = [landmarks[24].x, landmarks[24].y]
+                    knee = [landmarks[26].x, landmarks[26].y]
+                    ankle = [landmarks[28].x, landmarks[28].y]
+                    foot = [landmarks[32].x, landmarks[32].y]
+                else:
+                    shoulder = [landmarks[11].x, landmarks[11].y]
+                    hip = [landmarks[23].x, landmarks[23].y]
+                    knee = [landmarks[25].x, landmarks[25].y]
+                    ankle = [landmarks[27].x, landmarks[27].y]
+                    foot = [landmarks[31].x, landmarks[31].y]
 
-                for start, end in connections:
-                    x1 = int(landmarks[start].x * w)
-                    y1 = int(landmarks[start].y * h)
+                # ---------- Calculate joint angles ----------
+                # ---------- Trunk lean ----------
+                trunk_lean = calculate_trunk_lean(
+                    shoulder,
+                    hip
+                )
 
-                    x2 = int(landmarks[end].x * w)
-                    y2 = int(landmarks[end].y * h)
+                knee_angle = calculate_angle(
+                    hip,
+                    knee,
+                    ankle
+                )
 
-                    cv2.line(frame, (x1, y1), (x2, y2), (255, 0, 0), 3)
-                #Knee angle calculation
-                hip = [landmarks[24].x, landmarks[24].y]
-                knee = [landmarks[26].x, landmarks[26].y]
-                ankle = [landmarks[28].x, landmarks[28].y]
+                hip_angle = calculate_angle(
+                    shoulder,
+                    hip,
+                    knee
+                )
 
-                current_angle = calculate_angle(hip, knee, ankle)
-                knee_angles.append(current_angle)
+                ankle_angle = calculate_angle(
+                    knee,
+                    ankle,
+                    foot
+                )
+
+                # Save measurements for this frame
+                knee_data.append({
+                    "frame": int(cap.get(cv2.CAP_PROP_POS_FRAMES)),
+                    "knee": knee_angle
+                })
+
+                hip_data.append({
+                    "frame": int(cap.get(cv2.CAP_PROP_POS_FRAMES)),
+                    "hip": hip_angle
+                })
+
+                ankle_data.append({
+                    "frame": int(cap.get(cv2.CAP_PROP_POS_FRAMES)),
+                    "ankle": ankle_angle
+                })
+
+                trunk_data.append({
+                    "frame": int(cap.get(cv2.CAP_PROP_POS_FRAMES)),
+                    "trunk": trunk_lean
+                })
                 out.write(frame)
         out.release()
         cap.release()
 
-    if knee_angles:
-        max_bend = min(knee_angles)
-        if max_bend > 140:
+    if knee_data:
+
+        # Load-up = deepest knee bend
+        loadup_index = knee_data.index(
+            min(knee_data, key=lambda x: x["knee"])
+        )
+
+        loadup_frame = knee_data[loadup_index]["frame"]
+
+        # Find matching values from other data lists
+        loadup = {
+            "knee": knee_data[loadup_index]["knee"],
+            "hip": hip_data[loadup_index]["hip"],
+            "ankle": ankle_data[loadup_index]["ankle"],
+            "trunk": trunk_data[loadup_index]["trunk"],
+        }
+
+
+        # Contact frame
+        contact_index = next(
+            (
+                i for i, x in enumerate(knee_data)
+                if x["frame"] >= contact_frame
+            ),
+            len(knee_data)-1
+        )
+
+        contact = {
+            "knee": knee_data[contact_index]["knee"],
+            "hip": hip_data[contact_index]["hip"],
+            "ankle": ankle_data[contact_index]["ankle"],
+            "trunk": trunk_data[contact_index]["trunk"],
+        }
+
+
+        # Follow-through = last analyzed frame
+        follow_index = len(knee_data)-1
+
+        followthrough = {
+            "knee": knee_data[follow_index]["knee"],
+            "hip": hip_data[follow_index]["hip"],
+            "ankle": ankle_data[follow_index]["ankle"],
+            "trunk": trunk_data[follow_index]["trunk"],
+        }
+
+
+        if loadup["knee"] > 140:
             feedback = "Try bending your knee more before striking for extra power!"
         else:
-            feedback = "Good knee flexion! Great load-up for the shot."
+            feedback = "Good knee flexion during load-up."
+
     else:
-        max_bend = 0
+
+        loadup = {"knee":0}
+        contact = {"knee":0}
+        followthrough = {"knee":0}
+
         feedback = "Could not detect leg clearly in the video."
 
-    return jsonify(
-        {
-            "message": "Analysis complete!",
-            "total_frames": frames_processed,
-            "max_knee_bend_angle": max_bend,
-            "coaching_tip": feedback,
-        }
-    )
+    return jsonify({
+
+        "message": "Analysis complete!",
+
+        "loadup": {
+            "knee_angle": loadup["knee"],
+            "hip_angle": loadup["hip"],
+            "ankle_angle": loadup["ankle"],
+            "trunk_lean": loadup["trunk"],
+        },
+
+        "contact": {
+            "knee_angle": contact["knee"],
+            "hip_angle": contact["hip"],
+            "ankle_angle": contact["ankle"],
+            "trunk_lean": contact["trunk"],
+        },
+
+        "followthrough": {
+            "knee_angle": followthrough["knee"],
+            "hip_angle": followthrough["hip"],
+            "ankle_angle": followthrough["ankle"],
+            "trunk_lean": followthrough["trunk"],
+        },
+
+        "coaching_tip": feedback,
+
+    })
+@app.route("/extract-frames", methods=["POST"])
+def extract_frames():
+
+    if "video" not in request.files:
+        return jsonify({"error": "No video file provided"}), 400
+
+    video_file = request.files["video"]
+    video_path = "./frame_video.mp4"
+    video_file.save(video_path)
+
+    cap = cv2.VideoCapture(video_path)
+
+    frames = []
+    frame_number = 0
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    if fps == 0:
+        fps = 30
+
+    while True:
+        success, frame = cap.read()
+
+        if not success:
+            break
+
+        # Take every 3rd frame
+        if frame_number % 3 == 0:
+
+            # Make smaller preview
+            frame = cv2.resize(frame, (160, 90))
+
+            success, buffer = cv2.imencode(".jpg", frame)
+
+            if success:
+                image_base64 = base64.b64encode(buffer).decode("utf-8")
+
+                frames.append({
+                    "frame": frame_number,
+                    "time": frame_number / fps,
+                    "image": image_base64
+                })
+
+        frame_number += 1
+
+    cap.release()
+
+    return jsonify({
+        "fps": fps,
+        "totalFrames": frame_number,
+        "frames": frames
+    })
 @app.route("/get-video", methods=["GET"])
 def get_video():
     return send_file("output_skeleton.mp4", mimetype="video/mp4")
