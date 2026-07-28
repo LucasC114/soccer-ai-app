@@ -109,11 +109,6 @@ def analyze_video():
     # Analyze 0.3 seconds before and 0.2 seconds after contact
     frames_before = int(fps * 0.3)
     frames_after = int(fps * 0.2)
-
-    start_frame = max(0, int(contact_frame) - frames_before)
-    end_frame = int(contact_frame) + frames_after
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     
     # Store biomechanics data
     knee_data = []
